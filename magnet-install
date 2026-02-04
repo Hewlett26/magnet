@@ -1,0 +1,70 @@
+#!/bin/bash
+set -e
+
+echo "== MagnetOS bootstrap starting =="
+
+# Just in case someone runs this as root
+if [[ $UID -eq 0 ]]; then
+	echo "Do NOT run this as root."
+	exit 1
+fi
+
+# Update the arch setup
+sudo pacman -Syu --noconfirm
+
+# Install core packages
+echo "== Installing necessary packages for distrobox =="
+sudo pacman -S --needed --noconfirm \
+podman \
+distrobox \
+fuse-overlayfs \
+slirp4netns \
+wget \
+curl \
+git \
+base-devel
+
+#Installing Yay
+if ! command -v yay &>/dev/null; then
+	git clone https://aur.archlinux.org/yay.git
+	cd yay
+	makepkg -si --noconfirm
+	cd ..
+	rm -rf yay
+else
+	echo "Yay already installed."
+fi
+
+#Installing Magnet
+git clone https://github.com/Hewlett26/magnet.git
+cd magnet
+sudo install magnet /usr/local/bin/magnet
+
+# Enable user namespaces 
+echo "== Ensuring user namespaces =="
+sudo sysctl -w kernel.unprivileged_userns_clone=1
+
+# Podman info
+echo "Podman info: "
+podman info >/dev/null
+
+# Create containers for Fedora and Debian
+distrobox create \
+--name magnet-debian \
+--image "docker.io/library/debian:stable"
+
+podman pull "docker.io/library/fedora:latest"
+distrobox create \
+--name magnet-fedora \
+--image fedora:latest
+
+# Finishing touches
+echo 
+echo "== Bootstrap complete =="
+echo "== Available containers: =="
+echo
+distrobox list
+echo
+echo "== Just in case of magnet script bugs, enter the containers with: =="
+echo
+echo "distrobox enter magnet-(box name)"
