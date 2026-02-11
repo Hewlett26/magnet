@@ -34,11 +34,11 @@ aur_has() {
 }
 
 apt_has() {
-	sudo -u "$SUDO_USER" distrobox enter "magnet-debian" -- apt-cache search "$1" &>/dev/null
+	sudo -u "$SUDO_USER" distrobox enter "magnet-debian" -- apt-cache show "$1" &>/dev/null
 }
 
 dnf_has() {
-	sudo -u "$SUDO_USER" distrobox enter "$FEDORA_BOX" -- dnf search "$1" &>/dev/null
+	sudo -u "$SUDO_USER" distrobox enter "$FEDORA_BOX" -- dnf info "$1" &>/dev/null
 }
 
 #%%%%%%%%%%%%%%%%%%%%%% Install %%%%%%%%%%%%%%%%%%%%%%%%%%%%
