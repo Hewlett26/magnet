@@ -36,8 +36,6 @@ else
 fi
 
 #Installing Magnet
-git clone https://github.com/Hewlett26/magnet.git
-cd magnet
 sudo install magnet /usr/local/bin/magnet
 
 # Enable user namespaces 
