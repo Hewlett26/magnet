@@ -44,37 +44,47 @@ dnf_has() {
 #%%%%%%%%%%%%%%%%%%%%%% Install %%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 install_pkg() {
-	PKG="$1"
-	
-	log "Searching for $PKG..."
-	
-	if pacman_has "$PKG"; then
-		log "Installing via pacman..."
-		sudo pacman -S --needed "$PKG"
-		exit 0
-	fi
-	
-	if command_exists yay && aur_has "$PKG"; then
-		log "Installing via AUR..."
-		sudo -u "$SUDO_USER" yay -S "$PKG"
-		exit 0
-	fi
-	
-	if apt_has "$PKG"; then
-		log "Installing via Debian Container..."
-		sudo -u "$SUDO_USER" distrobox enter "$DEBIAN_BOX" -- sudo apt install -y "$PKG"
-		exit 0
-	fi
-	
-	if dnf_has "$PKG"; then
-		log "Installing via Fedora Container..."
-		sudo -u "$SUDO_USER" distrobox enter "$FEDORA_BOX" -- sudo dnf install -y "$PKG"
-		exit 0
-	fi
-	
-	log "Package not found anywhere."
-	exit 1
+    PKG="$1"
+    FORCE_SRC="$2"
+
+    log "Searching for $PKG..."
+
+    if [[ -n "$FORCE_SRC" ]]; then
+        SRC="$FORCE_SRC"
+    else
+        SRC=$(select_source "$PKG") || exit 1
+    fi
+
+    case "$SRC" in
+
+        pacman)
+            log "Installing via pacman..."
+            sudo pacman -S --needed "$PKG"
+            ;;
+
+        aur)
+            log "Installing via AUR..."
+            sudo -u "$SUDO_USER" yay -S "$PKG"
+            ;;
+
+        debian)
+            log "Installing via Debian container..."
+            sudo -u "$SUDO_USER" distrobox enter "$DEBIAN_BOX" -- sudo apt install -y "$PKG"
+            ;;
+
+        fedora)
+            log "Installing via Fedora container..."
+            sudo -u "$SUDO_USER" distrobox enter "$FEDORA_BOX" -- sudo dnf install -y "$PKG"
+            ;;
+
+        *)
+            log "Invalid source: $SRC"
+            exit 1
+            ;;
+
+    esac
 }
+
 
 #%%%%%%%%%%%%%%%%%%%%%% Remove %%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
@@ -137,6 +147,40 @@ update_all() {
 	log "Update complete."
 }
 
+#%%%%%%%%%%%%%%%%%%%%%%% Search %%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+search_pkg() {
+    PKG="$1"
+    FOUND=0
+
+    log "Searching for $PKG..."
+
+    if pacman_has "$PKG"; then
+        echo "Found in: pacman (host)"
+        FOUND=1
+    fi
+
+    if command_exists yay && aur_has "$PKG"; then
+        echo "Found in: aur"
+        FOUND=1
+    fi
+
+    if apt_has "$PKG"; then
+        echo "Found in: debian container ($DEBIAN_BOX)"
+        FOUND=1
+    fi
+
+    if dnf_has "$PKG"; then
+        echo "Found in: fedora container ($FEDORA_BOX)"
+        FOUND=1
+    fi
+
+    if [[ $FOUND -eq 0 ]]; then
+        log "Package not found anywhere."
+        return 1
+    fi
+}
+
 #%%%%%%%%%%%%%% Placeholder of Self Update %%%%%%%%%%%%%%%%%
 
 
@@ -147,9 +191,19 @@ update_all() {
 
 case "$1" in
 
+	search)
+    	search_pkg "$2"
+    	;;
+
+
 	install)
-		install_pkg "$2"
-		;;
+    	if [[ "$3" == "--from" ]]; then
+        	install_pkg "$2" "$4"
+    	else
+        	install_pkg "$2"
+   		fi
+    	;;
+
 	
 	remove)
 		remove_pkg "$2"
