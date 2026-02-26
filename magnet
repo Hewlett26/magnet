@@ -12,6 +12,11 @@ log() {
     echo "[MAGNET] $1" >> "$LOGFILE" 2>/dev/null || true
 }
 
+if [[ -z "${2:-}" && "$1" != "update" ]]; then
+    echo "Error: Missing package name."
+    exit 1
+fi
+
 #%%%%%%%%%%%%%%%%%%%%% Config %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 DEBIAN_BOX="magnet-debian"
@@ -37,6 +42,40 @@ apt_has() {
 
 dnf_has() {
     sudo -u "$SUDO_USER" distrobox enter "$FEDORA_BOX" -- dnf search "$1" &>/dev/null
+}
+
+#%%%%%%%%%%%%%%%%%%%%%% Search %%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+search_pkg() {
+    PKG="$1"
+    FOUND=0
+
+    log "Searching for $PKG..."
+
+    if pacman_has "$PKG"; then
+        echo "✔ Found in pacman (Arch)"
+        FOUND=1
+    fi
+
+    if command_exists yay && aur_has "$PKG"; then
+        echo "✔ Found in AUR"
+        FOUND=1
+    fi
+
+    if apt_has "$PKG"; then
+        echo "✔ Found in Debian container"
+        FOUND=1
+    fi
+
+    if dnf_has "$PKG"; then
+        echo "✔ Found in Fedora container"
+        FOUND=1
+    fi
+
+    if [[ $FOUND -eq 0 ]]; then
+        echo "✘ Package not found anywhere."
+        exit 1
+    fi
 }
 
 #%%%%%%%%%%%%%%%%%%%%%% Install %%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -138,21 +177,30 @@ update_all() {
 #%%%%%%%%%%%%%%%%%%%%%%%%%% CLI %%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 case "$1" in
+
     install)
         install_pkg "$2"
         ;;
+
     remove)
         remove_pkg "$2"
         ;;
+
+    search)
+        search_pkg "$2"
+        ;;
+
     update)
         update_all
         ;;
+
     *)
         echo "Magnet Package Management Wrapper"
         echo ""
         echo "Usage:"
         echo " magnet install <pkg>"
         echo " magnet remove <pkg>"
+        echo " magnet search <pkg>"
         echo " magnet update"
         ;;
 esac
