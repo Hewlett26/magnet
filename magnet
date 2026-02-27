@@ -81,35 +81,60 @@ search_pkg() {
 #%%%%%%%%%%%%%%%%%%%%%% Install %%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 install_pkg() {
-    PKG="$1"
+    local PKG="$1"
+    local FORCED_SOURCE="$2"
 
     log "Searching for $PKG..."
 
+    # If user forced a source
+    if [[ -n "$FORCED_SOURCE" ]]; then
+        case "$FORCED_SOURCE" in
+            pacman)
+                pacman_has "$PKG" || { echo "Not found in pacman"; exit 1; }
+                sudo pacman -S --needed "$PKG"
+                ;;
+            aur)
+                aur_has "$PKG" || { echo "Not found in AUR"; exit 1; }
+                sudo -u "$SUDO_USER" yay -S "$PKG"
+                ;;
+            debian)
+                apt_has "$PKG" || { echo "Not found in Debian container"; exit 1; }
+                sudo -u "$SUDO_USER" distrobox enter "$DEBIAN_BOX" -- sudo apt install -y "$PKG"
+                ;;
+            fedora)
+                dnf_has "$PKG" || { echo "Not found in Fedora container"; exit 1; }
+                sudo -u "$SUDO_USER" distrobox enter "$FEDORA_BOX" -- sudo dnf install -y "$PKG"
+                ;;
+            *)
+                echo "Invalid source: $FORCED_SOURCE"
+                exit 1
+                ;;
+        esac
+        return
+    fi
+
+    # Default order logic
     if pacman_has "$PKG"; then
-        log "Installing via pacman..."
         sudo pacman -S --needed "$PKG"
-        exit 0
+        return
     fi
 
     if command_exists yay && aur_has "$PKG"; then
-        log "Installing via AUR..."
         sudo -u "$SUDO_USER" yay -S "$PKG"
-        exit 0
+        return
     fi
 
     if apt_has "$PKG"; then
-        log "Installing via Debian Container..."
         sudo -u "$SUDO_USER" distrobox enter "$DEBIAN_BOX" -- sudo apt install -y "$PKG"
-        exit 0
+        return
     fi
 
     if dnf_has "$PKG"; then
-        log "Installing via Fedora Container..."
         sudo -u "$SUDO_USER" distrobox enter "$FEDORA_BOX" -- sudo dnf install -y "$PKG"
-        exit 0
+        return
     fi
 
-    log "Package not found anywhere."
+    echo "Package '$PKG' not found anywhere."
     exit 1
 }
 
@@ -179,8 +204,28 @@ update_all() {
 case "$1" in
 
     install)
-        install_pkg "$2"
-        ;;
+    shift  # remove "install"
+
+    SOURCE=""
+    PACKAGES=()
+
+    for arg in "$@"; do
+        if [[ "$arg" == --source=* ]]; then
+            SOURCE="${arg#--source=}"
+        else
+            PACKAGES+=("$arg")
+        fi
+    done
+
+    if [[ ${#PACKAGES[@]} -eq 0 ]]; then
+        echo "No packages specified."
+        exit 1
+    fi
+
+    for pkg in "${PACKAGES[@]}"; do
+        install_pkg "$pkg" "$SOURCE"
+    done
+    ;;
 
     remove)
         remove_pkg "$2"
