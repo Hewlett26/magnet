@@ -204,28 +204,28 @@ update_all() {
 case "$1" in
 
     install)
-    shift  # remove "install"
+        shift  # remove "install"
 
-    SOURCE=""
-    PACKAGES=()
+        SOURCE=""
+        PACKAGES=()
 
-    for arg in "$@"; do
-        if [[ "$arg" == --source=* ]]; then
-            SOURCE="${arg#--source=}"
-        else
-            PACKAGES+=("$arg")
+        for arg in "$@"; do
+            if [[ "$arg" == --source=* ]]; then
+                SOURCE="${arg#--source=}"
+            else
+                PACKAGES+=("$arg")
+            fi
+        done
+    
+        if [[ ${#PACKAGES[@]} -eq 0 ]]; then
+            echo "No packages specified."
+            exit 1
         fi
-    done
-
-    if [[ ${#PACKAGES[@]} -eq 0 ]]; then
-        echo "No packages specified."
-        exit 1
-    fi
-
-    for pkg in "${PACKAGES[@]}"; do
-        install_pkg "$pkg" "$SOURCE"
-    done
-    ;;
+    
+        for pkg in "${PACKAGES[@]}"; do
+            install_pkg "$pkg" "$SOURCE"
+        done
+        ;;
 
     remove)
         remove_pkg "$2"
