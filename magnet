@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -u
+set -uo pipefail
 
 #%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 #  Magnet Package Management Wrapper  #
@@ -12,6 +12,11 @@ log() {
     echo "[MAGNET] $1" >> "$LOGFILE" 2>/dev/null || true
 }
 
+if [[ -z "${SUDO_USER:-}" ]]; then
+    echo "Error: Must be run with sudo."
+    exit 1
+fi
+
 if [[ -z "${2:-}" && "$1" != "update" ]]; then
     echo "Error: Missing package name."
     exit 1
@@ -21,6 +26,28 @@ fi
 
 DEBIAN_BOX="magnet-debian"
 FEDORA_BOX="magnet-fedora"
+
+LOCK_DIR="/tmp/magnet-locks"
+mkdir -p "$LOCK_DIR"
+
+#%%%%%%%%%%%%%%%%%%%%% Lock Helpers %%%%%%%%%%%%%%%%%%%%%%%%
+
+acquire_lock() {
+    local name="$1"
+    local lockfile="$LOCK_DIR/$name.lock"
+    exec {_LOCK_FD}>"$lockfile"
+    if ! flock -n "$_LOCK_FD"; then
+        echo "Error: Another magnet operation is already using $name. Aborting."
+        exit 1
+    fi
+}
+
+release_lock() {
+    local name="$1"
+    local lockfile="$LOCK_DIR/$name.lock"
+    flock -u "$_LOCK_FD"
+    rm -f "$lockfile"
+}
 
 #%%%%%%%%%%%%%%%%%%%%% Helpers %%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
@@ -84,117 +111,150 @@ install_pkg() {
     local PKG="$1"
     local FORCED_SOURCE="$2"
 
-    log "Searching for $PKG..."
+    log "Installing $PKG..."
 
-    # If user forced a source
     if [[ -n "$FORCED_SOURCE" ]]; then
         case "$FORCED_SOURCE" in
             pacman)
-                pacman_has "$PKG" || { echo "Not found in pacman"; exit 1; }
+                pacman_has "$PKG" || { echo "Not found in pacman"; return 1; }
+                acquire_lock "pacman"
                 sudo pacman -S --needed "$PKG"
+                release_lock "pacman"
                 ;;
             aur)
-                aur_has "$PKG" || { echo "Not found in AUR"; exit 1; }
+                aur_has "$PKG" || { echo "Not found in AUR"; return 1; }
+                acquire_lock "aur"
                 sudo -u "$SUDO_USER" yay -S "$PKG"
+                release_lock "aur"
                 ;;
             debian)
-                apt_has "$PKG" || { echo "Not found in Debian container"; exit 1; }
+                apt_has "$PKG" || { echo "Not found in Debian container"; return 1; }
+                acquire_lock "debian"
                 sudo -u "$SUDO_USER" distrobox enter "$DEBIAN_BOX" -- sudo apt install -y "$PKG"
+                release_lock "debian"
                 ;;
             fedora)
-                dnf_has "$PKG" || { echo "Not found in Fedora container"; exit 1; }
+                dnf_has "$PKG" || { echo "Not found in Fedora container"; return 1; }
+                acquire_lock "fedora"
                 sudo -u "$SUDO_USER" distrobox enter "$FEDORA_BOX" -- sudo dnf install -y "$PKG"
+                release_lock "fedora"
                 ;;
             *)
                 echo "Invalid source: $FORCED_SOURCE"
-                exit 1
+                return 1
                 ;;
         esac
-        return
+        return 0
     fi
 
-    # Default order logic
+    # Default priority order
     if pacman_has "$PKG"; then
+        acquire_lock "pacman"
         sudo pacman -S --needed "$PKG"
-        return
+        release_lock "pacman"
+        return 0
     fi
 
     if command_exists yay && aur_has "$PKG"; then
+        acquire_lock "aur"
         sudo -u "$SUDO_USER" yay -S "$PKG"
-        return
+        release_lock "aur"
+        return 0
     fi
 
     if apt_has "$PKG"; then
+        acquire_lock "debian"
         sudo -u "$SUDO_USER" distrobox enter "$DEBIAN_BOX" -- sudo apt install -y "$PKG"
-        return
+        release_lock "debian"
+        return 0
     fi
 
     if dnf_has "$PKG"; then
+        acquire_lock "fedora"
         sudo -u "$SUDO_USER" distrobox enter "$FEDORA_BOX" -- sudo dnf install -y "$PKG"
-        return
+        release_lock "fedora"
+        return 0
     fi
 
     echo "Package '$PKG' not found anywhere."
-    exit 1
+    return 1
 }
 
 #%%%%%%%%%%%%%%%%%%%%%% Remove %%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 remove_pkg() {
-    PKG="$1"
-    FOUND=0
+    local PKG="$1"
+    local FOUND=0
 
-    log "Searching for $PKG..."
+    log "Searching for installed $PKG..."
 
     if pacman -Qi "$PKG" &>/dev/null; then
-        log "Removing via pacman..."
+        log "Removing $PKG via pacman..."
+        acquire_lock "pacman"
         sudo pacman -Rns "$PKG"
+        release_lock "pacman"
         FOUND=1
     fi
 
     if command_exists yay && yay -Qi "$PKG" &>/dev/null; then
-        log "Removing via AUR..."
+        log "Removing $PKG via AUR..."
+        acquire_lock "aur"
         sudo -u "$SUDO_USER" yay -Rns "$PKG"
+        release_lock "aur"
         FOUND=1
     fi
 
-    if distrobox enter "$DEBIAN_BOX" -- dpkg -s "$PKG" &>/dev/null; then
-        log "Removing via Debian container"
+    if sudo -u "$SUDO_USER" distrobox enter "$DEBIAN_BOX" -- dpkg -s "$PKG" &>/dev/null; then
+        log "Removing $PKG via Debian container..."
+        acquire_lock "debian"
         sudo -u "$SUDO_USER" distrobox enter "$DEBIAN_BOX" -- sudo apt remove -y "$PKG"
+        release_lock "debian"
         FOUND=1
     fi
 
-    if distrobox enter "$FEDORA_BOX" -- rpm -q "$PKG" &>/dev/null; then
-        log "Removing via Fedora container"
+    if sudo -u "$SUDO_USER" distrobox enter "$FEDORA_BOX" -- rpm -q "$PKG" &>/dev/null; then
+        log "Removing $PKG via Fedora container..."
+        acquire_lock "fedora"
         sudo -u "$SUDO_USER" distrobox enter "$FEDORA_BOX" -- sudo dnf remove -y "$PKG"
+        release_lock "fedora"
         FOUND=1
     fi
 
-    if [[ FOUND -eq 0 ]]; then
+    if [[ $FOUND -eq 0 ]]; then
         log "Package '$PKG' is not installed anywhere."
-        exit 1
+        return 1
     fi
 
-    log "Removal Finished."
+    log "$PKG removed."
+    return 0
 }
 
 #%%%%%%%%%%%%%%%%%%%%%% Update %%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 update_all() {
-
     log "Updating Arch packages..."
-    sudo pacman -Syu
+    acquire_lock "pacman"
+    sudo pacman -Syu || { log "pacman update failed. Aborting."; release_lock "pacman"; exit 1; }
+    release_lock "pacman"
 
     if command_exists yay; then
         log "Updating AUR (yay) packages..."
-        sudo -u "$SUDO_USER" yay -Syu
+        acquire_lock "aur"
+        sudo -u "$SUDO_USER" yay -Syu || { log "yay update failed. Aborting."; release_lock "aur"; exit 1; }
+        release_lock "aur"
     fi
 
-    log "Updating Debian Container..."
-    sudo -u "$SUDO_USER" distrobox enter "$DEBIAN_BOX" -- sudo apt update && sudo apt upgrade -y
+    log "Updating Debian container..."
+    acquire_lock "debian"
+    sudo -u "$SUDO_USER" distrobox enter "$DEBIAN_BOX" -- bash -c "sudo apt update && sudo apt upgrade -y" \
+        || { log "Debian update failed. Aborting."; release_lock "debian"; exit 1; }
+    release_lock "debian"
 
-    log "Updating Fedora Container..."
-    sudo -u "$SUDO_USER" distrobox enter "$FEDORA_BOX" -- sudo dnf upgrade -y
+    log "Updating Fedora container..."
+    acquire_lock "fedora"
+    sudo -u "$SUDO_USER" distrobox enter "$FEDORA_BOX" -- sudo dnf upgrade -y \
+        || { log "Fedora update failed. Aborting."; release_lock "fedora"; exit 1; }
+    release_lock "fedora"
 
     log "Update complete."
 }
@@ -204,7 +264,7 @@ update_all() {
 case "$1" in
 
     install)
-        shift  # remove "install"
+        shift
 
         SOURCE=""
         PACKAGES=()
@@ -216,19 +276,46 @@ case "$1" in
                 PACKAGES+=("$arg")
             fi
         done
-    
+
         if [[ ${#PACKAGES[@]} -eq 0 ]]; then
             echo "No packages specified."
             exit 1
         fi
-    
+
+        FAILED=()
         for pkg in "${PACKAGES[@]}"; do
-            install_pkg "$pkg" "$SOURCE"
+            if ! install_pkg "$pkg" "$SOURCE"; then
+                FAILED+=("$pkg")
+            fi
         done
+
+        if [[ ${#FAILED[@]} -gt 0 ]]; then
+            echo ""
+            log "Failed to install: ${FAILED[*]}"
+            exit 1
+        fi
         ;;
 
     remove)
-        remove_pkg "$2"
+        shift
+
+        if [[ $# -eq 0 ]]; then
+            echo "No packages specified."
+            exit 1
+        fi
+
+        FAILED=()
+        for pkg in "$@"; do
+            if ! remove_pkg "$pkg"; then
+                FAILED+=("$pkg")
+            fi
+        done
+
+        if [[ ${#FAILED[@]} -gt 0 ]]; then
+            echo ""
+            log "Not found / failed to remove: ${FAILED[*]}"
+            exit 1
+        fi
         ;;
 
     search)
@@ -243,9 +330,9 @@ case "$1" in
         echo "Magnet Package Management Wrapper"
         echo ""
         echo "Usage:"
-        echo " magnet install <pkg>"
-        echo " magnet remove <pkg>"
-        echo " magnet search <pkg>"
-        echo " magnet update"
+        echo "  magnet install [--source=pacman|aur|debian|fedora] <pkg> [pkg2 ...]"
+        echo "  magnet remove <pkg> [pkg2 ...]"
+        echo "  magnet search <pkg>"
+        echo "  magnet update"
         ;;
 esac
