@@ -37,7 +37,7 @@ aur_has() {
 }
 
 apt_has() {
-    sudo -u "$SUDO_USER" distrobox enter "$DEBIAN_BOX" -- apt-cache search "$1" &>/dev/null
+    sudo -u "$SUDO_USER" distrobox enter "$DEBIAN_BOX" -- apt-cache show "$1" &>/dev/null
 }
 
 dnf_has() {
