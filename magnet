@@ -29,14 +29,18 @@ FEDORA_BOX="magnet-fedora"
 
 LOCK_DIR="/tmp/magnet-locks"
 mkdir -p "$LOCK_DIR"
+trap 'rm -f "$LOCK_DIR"/*.lock' EXIT INT TERM
 
 #%%%%%%%%%%%%%%%%%%%%% Lock Helpers %%%%%%%%%%%%%%%%%%%%%%%%
+
+declare -A LOCK_FDS
 
 acquire_lock() {
     local name="$1"
     local lockfile="$LOCK_DIR/$name.lock"
-    exec {_LOCK_FD}>"$lockfile"
-    if ! flock -n "$_LOCK_FD"; then
+    exec {fd}>"$lockfile"
+    LOCK_FDS[$name]=$fd
+    if ! flock -n "${LOCK_FDS[$name]}"; then
         echo "Error: Another magnet operation is already using $name. Aborting."
         exit 1
     fi
@@ -44,9 +48,9 @@ acquire_lock() {
 
 release_lock() {
     local name="$1"
-    local lockfile="$LOCK_DIR/$name.lock"
-    flock -u "$_LOCK_FD"
-    rm -f "$lockfile"
+    flock -u "${LOCK_FDS[$name]}"
+    rm -f "$LOCK_DIR/$name.lock"
+    unset "LOCK_FDS[$name]"
 }
 
 #%%%%%%%%%%%%%%%%%%%%% Helpers %%%%%%%%%%%%%%%%%%%%%%%%%%%%%
