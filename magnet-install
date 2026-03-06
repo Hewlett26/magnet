@@ -36,7 +36,22 @@ else
 fi
 
 #Installing Magnet
+echo "Installing and initializing magnet..."
 sudo install magnet /usr/local/bin/magnet
+LOGFILE="/var/log/magnet.log"
+DB_DIR="/var/lib/magnet"
+DB_FILE="$DB_DIR/packages.csv"
+PROFILES_DIR="$DB_DIR/profiles"
+LOCK_DIR="/tmp/magnet-locks"
+sudo mkdir -p "$LOCK_DIR"
+sudo mkdir -p "$DB_DIR"
+sudo mkdir -p "$PROFILES_DIR"
+trap 'rm -f "$LOCK_DIR"/*.lock' EXIT INT TERM
+
+# Create CSV with header if it doesn't exist
+if [[ ! -f "$DB_FILE" ]]; then
+     echo "package,source,date,user" | sudo tee "$DB_FILE"
+fi
 
 # Enable user namespaces 
 echo "== Ensuring user namespaces =="
