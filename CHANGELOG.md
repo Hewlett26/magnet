@@ -4,6 +4,26 @@ All notable changes to Magnet are documented here.
 
 ---
 
+## [0.5] - 2026-03-23
+
+### Added
+- `magnet add-profile` — create a new empty profile
+- `magnet remove-profile` — delete an existing profile
+- `magnet profile-add <profile> <pkg> --source=` — add a package to a profile without installing it
+- `magnet profile-remove <profile> <pkg>` — remove a package from a profile
+- `--source` flag for `magnet remove` — force removal from a specific package manager
+- `-h` / `--help` flag — show usage without needing to pass an invalid command
+- auto-export distrobox apps and remove cache on uninstalling the apps
+
+### Fixed
+- Lockfile bug — `local fd` declaration missing in `acquire_lock` caused `fd: unbound variable` error
+- `acquire_lock` now defensively creates the lock directory itself rather than relying on startup state
+
+### Changed
+- Profile management overhauled — profiles are now curated manually rather than being snapshots of the installed database
+
+---
+
 ## [0.4] - 2026-03-06
 
 ### Added
