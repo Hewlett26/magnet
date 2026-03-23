@@ -2,7 +2,7 @@
 
 A unified package management wrapper for Arch Linux systems running [Distrobox](https://github.com/89luca89/distrobox). Magnet provides a single CLI interface that transparently delegates to `pacman`, `yay` (AUR), `apt` (via a Debian container), and `dnf` (via a Fedora container) — with a persistent database tracking everything it installs.
 
-> **Current version:** v0.4 — [See what's new](CHANGELOG.md)
+> **Current version:** v0.5 — [See what's new](CHANGELOG.md)
 
 ---
 
