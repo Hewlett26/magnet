@@ -2,7 +2,7 @@
 set -uo pipefail
 
 #%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-#  Magnet Package Management Wrapper  v0.5               #
+#  Magnet Package Management Wrapper  v0.5                #
 #%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 #%%%%%%%%%%%%%%%%%%%%% Color %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -54,7 +54,7 @@ if [[ $# -eq 0 ]]; then
     exit 1
 fi
 
-if [[ -z "${2:-}" ]] && [[ "$1" != "update" ]] && [[ "$1" != "log" ]] && [[ "$1" != "list" ]]; then
+if [[ -z "${2:-}" ]] && [[ "$1" != "update" ]] && [[ "$1" != "log" ]] && [[ "$1" != "list" ]] && [[ "$1" != "add-profile" ]] && [[ "$1" != "remove-profile" ]] && [[ "$1" != "-h" ]] && [[ "$1" != "--help" ]]; then
     echo -e "${RED}Error:${NC} Missing argument."
     exit 1
 fi
@@ -114,7 +114,6 @@ acquire_lock() {
     local lockfile="$LOCK_DIR/$name.lock"
     local fd
 
-    # Defensively ensure lock dir exists regardless of startup state
     mkdir -p "$LOCK_DIR" || {
         log_err "Could not create lock directory $LOCK_DIR"
         exit 1
@@ -160,43 +159,6 @@ apt_has() {
 
 dnf_has() {
     sudo -u "$SUDO_USER" distrobox enter "$FEDORA_BOX" -- dnf search "$1" &>/dev/null
-}
-
-# Resolve a package name or app ID to a Flatpak application ID.
-# Tries exact name match first, then exact app ID match.
-# Returns the app ID on stdout, or returns 1 if not found.
-flatpak_resolve() {
-    local PKG="$1"
-
-    if ! command_exists flatpak; then
-        return 1
-    fi
-
-    # flatpak search outputs: Name \t Description \t AppID \t Version \t Branch \t Remotes
-    # Try exact Name match first (case-insensitive)
-    local match
-    match="$(flatpak search --columns=name,application "$PKG" 2>/dev/null \
-        | awk -F'\t' -v pkg="$PKG" 'tolower($1) == tolower(pkg) { print $2; exit }')"
-
-    if [[ -n "$match" ]]; then
-        echo "$match"
-        return 0
-    fi
-
-    # Fall back to exact application ID match
-    match="$(flatpak search --columns=name,application "$PKG" 2>/dev/null \
-        | awk -F'\t' -v pkg="$PKG" 'tolower($2) == tolower(pkg) { print $2; exit }')"
-
-    if [[ -n "$match" ]]; then
-        echo "$match"
-        return 0
-    fi
-
-    return 1
-}
-
-flatpak_has() {
-    flatpak_resolve "$1" &>/dev/null
 }
 
 #%%%%%%%%%%%%%%%%%%%%%% Distrobox Export %%%%%%%%%%%%%%%%%%%
@@ -301,13 +263,6 @@ search_pkg() {
         FOUND=1
     fi
 
-    echo -e "${CYAN}→${NC} Checking Flatpak..."
-    local flatpak_id
-    flatpak_id="$(flatpak_resolve "$PKG" 2>/dev/null)" && {
-        log_ok "Found in Flatpak ($flatpak_id)"
-        FOUND=1
-    }
-
     if [[ $FOUND -eq 0 ]]; then
         log_err "Package not found anywhere."
         exit 1
@@ -359,15 +314,6 @@ install_pkg() {
                     && db_add "$PKG" "fedora"
                 release_lock "fedora"
                 ;;
-            flatpak)
-                echo -e "${CYAN}→${NC} Checking Flatpak..."
-                local forced_app_id
-                forced_app_id="$(flatpak_resolve "$PKG")" || { log_err "Not found in Flatpak"; return 1; }
-                [[ "$DRY_RUN" == "1" ]] && { echo -e "  ${YELLOW}[dry-run]${NC} Would install $forced_app_id via Flatpak"; return 0; }
-                acquire_lock "flatpak"
-                flatpak install -y "$forced_app_id" && db_add "$forced_app_id" "flatpak"
-                release_lock "flatpak"
-                ;;
             *)
                 log_err "Invalid source: $FORCED_SOURCE"
                 return 1
@@ -392,16 +338,6 @@ install_pkg() {
         release_lock "aur"
         return 0
     fi
-
-    echo -e "${CYAN}→${NC} Checking Flatpak..."
-    local app_id
-    app_id="$(flatpak_resolve "$PKG" 2>/dev/null)" && {
-        [[ "$DRY_RUN" == "1" ]] && { echo -e "  ${YELLOW}[dry-run]${NC} Would install $app_id via Flatpak"; return 0; }
-        acquire_lock "flatpak"
-        flatpak install -y "$app_id" && db_add "$app_id" "flatpak"
-        release_lock "flatpak"
-        return 0
-    }
 
     echo -e "${CYAN}→${NC} Checking Debian container..."
     if apt_has "$PKG"; then
@@ -435,9 +371,55 @@ remove_pkg() {
     local PKG="$1"
     local DRY_RUN="$2"
     local PURGE="$3"
+    local FORCED_SOURCE="$4"
     local FOUND=0
 
     log_info "Searching for installed ${BOLD}$PKG${NC}..."
+
+    if [[ -n "$FORCED_SOURCE" ]]; then
+        case "$FORCED_SOURCE" in
+            pacman)
+                pacman -Qi "$PKG" &>/dev/null || { log_warn "Package '$PKG' is not installed via pacman."; return 1; }
+                [[ "$DRY_RUN" == "1" ]] && { echo -e "  ${YELLOW}[dry-run]${NC} Would remove $PKG via pacman"; return 0; }
+                log_info "Removing $PKG via pacman..."
+                acquire_lock "pacman"
+                sudo pacman -Rns "$PKG" && db_remove "$PKG"
+                release_lock "pacman"
+                ;;
+            aur)
+                command_exists yay && yay -Qi "$PKG" &>/dev/null || { log_warn "Package '$PKG' is not installed via AUR."; return 1; }
+                [[ "$DRY_RUN" == "1" ]] && { echo -e "  ${YELLOW}[dry-run]${NC} Would remove $PKG via AUR"; return 0; }
+                log_info "Removing $PKG via AUR..."
+                acquire_lock "aur"
+                sudo -u "$SUDO_USER" yay -Rns "$PKG" && db_remove "$PKG"
+                release_lock "aur"
+                ;;
+            debian)
+                sudo -u "$SUDO_USER" distrobox enter "$DEBIAN_BOX" -- dpkg -s "$PKG" &>/dev/null || { log_warn "Package '$PKG' is not installed in Debian container."; return 1; }
+                [[ "$DRY_RUN" == "1" ]] && { echo -e "  ${YELLOW}[dry-run]${NC} Would remove $PKG via Debian container"; return 0; }
+                log_info "Removing $PKG via Debian container..."
+                acquire_lock "debian"
+                sudo -u "$SUDO_USER" distrobox enter "$DEBIAN_BOX" -- sudo apt remove -y "$PKG" && db_remove "$PKG"
+                release_lock "debian"
+                [[ "$PURGE" == "1" ]] && purge_xdg_exports "$PKG"
+                ;;
+            fedora)
+                sudo -u "$SUDO_USER" distrobox enter "$FEDORA_BOX" -- rpm -q "$PKG" &>/dev/null || { log_warn "Package '$PKG' is not installed in Fedora container."; return 1; }
+                [[ "$DRY_RUN" == "1" ]] && { echo -e "  ${YELLOW}[dry-run]${NC} Would remove $PKG via Fedora container"; return 0; }
+                log_info "Removing $PKG via Fedora container..."
+                acquire_lock "fedora"
+                sudo -u "$SUDO_USER" distrobox enter "$FEDORA_BOX" -- sudo dnf remove -y "$PKG" && db_remove "$PKG"
+                release_lock "fedora"
+                [[ "$PURGE" == "1" ]] && purge_xdg_exports "$PKG"
+                ;;
+            *)
+                log_err "Invalid source: $FORCED_SOURCE"
+                return 1
+                ;;
+        esac
+        log_ok "$PKG removed."
+        return 0
+    fi
 
     if pacman -Qi "$PKG" &>/dev/null; then
         [[ "$DRY_RUN" == "1" ]] && { echo -e "  ${YELLOW}[dry-run]${NC} Would remove $PKG via pacman"; FOUND=1; }
@@ -487,32 +469,6 @@ remove_pkg() {
         fi
     fi
 
-    echo -e "${CYAN}→${NC} Checking Flatpak..."
-    # For Flatpak, PKG may be a friendly name or an app ID — check DB first
-    local fp_id
-    fp_id="$(db_source "$PKG")"
-    if [[ "$fp_id" == "flatpak" ]]; then
-        # DB stores the app ID as the package name for Flatpak installs
-        fp_id="$PKG"
-    else
-        fp_id=""
-    fi
-    # Also check if it's currently installed as a Flatpak regardless of DB
-    if [[ -z "$fp_id" ]] && flatpak info "$PKG" &>/dev/null; then
-        fp_id="$PKG"
-    fi
-
-    if [[ -n "$fp_id" ]]; then
-        [[ "$DRY_RUN" == "1" ]] && { echo -e "  ${YELLOW}[dry-run]${NC} Would remove $fp_id via Flatpak"; FOUND=1; }
-        if [[ "$DRY_RUN" != "1" ]]; then
-            log_info "Removing $fp_id via Flatpak..."
-            acquire_lock "flatpak"
-            flatpak uninstall -y "$fp_id" && db_remove "$PKG"
-            release_lock "flatpak"
-            FOUND=1
-        fi
-    fi
-
     if [[ $FOUND -eq 0 ]]; then
         log_warn "Package '$PKG' is not installed anywhere."
         return 1
@@ -548,14 +504,6 @@ update_all() {
     sudo -u "$SUDO_USER" distrobox enter "$FEDORA_BOX" -- sudo dnf upgrade -y \
         || { log_err "Fedora update failed. Aborting."; release_lock "fedora"; exit 1; }
     release_lock "fedora"
-
-    if command_exists flatpak; then
-        log_info "Updating Flatpak packages..."
-        acquire_lock "flatpak"
-        flatpak update -y \
-            || { log_err "Flatpak update failed. Aborting."; release_lock "flatpak"; exit 1; }
-        release_lock "flatpak"
-    fi
 
     log_ok "Update complete."
 }
@@ -671,7 +619,102 @@ import_pkgs() {
     log_ok "Profile '$PROFILE' imported successfully."
 }
 
-#%%%%%%%%%%%%%%%%%%%%%% Log %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+#%%%%%%%%%%%%%%%%%%%%%% Add Profile %%%%%%%%%%%%%%%%%%%%%%%%
+
+add_profile() {
+    local PROFILE="$1"
+    local DEST="$PROFILES_DIR/$PROFILE.csv"
+
+    if [[ -f "$DEST" ]]; then
+        log_warn "Profile '$PROFILE' already exists."
+        local answer
+        read -rp "$(echo -e "  ${BOLD}Overwrite? [y/N]:${NC} ")" answer
+        if [[ "$answer" != "y" && "$answer" != "Y" ]]; then
+            log_info "Aborted."
+            return 1
+        fi
+    fi
+
+    echo "package,source,date,user" > "$DEST"
+    log_ok "Profile '$PROFILE' created at $DEST"
+}
+
+#%%%%%%%%%%%%%%%%%%%%%% Remove Profile %%%%%%%%%%%%%%%%%%%%%
+
+remove_profile() {
+    local PROFILE="$1"
+    local DEST="$PROFILES_DIR/$PROFILE.csv"
+
+    if [[ ! -f "$DEST" ]]; then
+        log_warn "Profile '$PROFILE' does not exist."
+        return 1
+    fi
+
+    rm -f "$DEST"
+    log_ok "Profile '$PROFILE' removed."
+}
+
+#%%%%%%%%%%%%%%%%%%%%%% Profile Add %%%%%%%%%%%%%%%%%%%%%%%%
+
+profile_add() {
+    local PROFILE="$1"
+    local PKG="$2"
+    local SOURCE="$3"
+    local DEST="$PROFILES_DIR/$PROFILE.csv"
+
+    if [[ ! -f "$DEST" ]]; then
+        log_err "Profile '$PROFILE' does not exist. Create it first with: magnet add-profile $PROFILE"
+        return 1
+    fi
+
+    # Check if package already exists in profile (any source)
+    if grep -q "^$PKG," "$DEST" 2>/dev/null; then
+        local existing_source
+        existing_source="$(grep "^$PKG," "$DEST" | cut -d',' -f2)"
+        log_warn "$PKG is already in profile '$PROFILE' (source: $existing_source). Remove it first."
+        return 1
+    fi
+
+    # Validate source
+    case "$SOURCE" in
+        pacman|aur|debian|fedora) ;;
+        *)
+            log_err "Invalid source '$SOURCE'. Must be one of: pacman, aur, debian, fedora"
+            return 1
+            ;;
+    esac
+
+    local date
+    date="$(date '+%Y-%m-%d %H:%M:%S')"
+    echo "$PKG,$SOURCE,$date,$SUDO_USER" >> "$DEST"
+    log_ok "Added $PKG ($SOURCE) to profile '$PROFILE'."
+}
+
+#%%%%%%%%%%%%%%%%%%%%%% Profile Remove %%%%%%%%%%%%%%%%%%%%%
+
+profile_remove() {
+    local PROFILE="$1"
+    local PKG="$2"
+    local DEST="$PROFILES_DIR/$PROFILE.csv"
+
+    if [[ ! -f "$DEST" ]]; then
+        log_err "Profile '$PROFILE' does not exist."
+        return 1
+    fi
+
+    if ! grep -q "^$PKG," "$DEST" 2>/dev/null; then
+        log_warn "$PKG is not in profile '$PROFILE'."
+        return 1
+    fi
+
+    local tmp
+    tmp="$(mktemp)"
+    grep -v "^$PKG," "$DEST" > "$tmp" || true
+    mv "$tmp" "$DEST"
+    log_ok "Removed $PKG from profile '$PROFILE'."
+}
+
+
 
 show_log() {
     if [[ ! -f "$LOGFILE" ]]; then
@@ -743,6 +786,7 @@ case "$1" in
 
         DRY_RUN="0"
         PURGE="1"
+        SOURCE=""
         PACKAGES=()
 
         for arg in "$@"; do
@@ -750,6 +794,8 @@ case "$1" in
                 DRY_RUN="1"
             elif [[ "$arg" == "--no-purge" ]]; then
                 PURGE="0"
+            elif [[ "$arg" == --source=* ]]; then
+                SOURCE="${arg#--source=}"
             else
                 PACKAGES+=("$arg")
             fi
@@ -765,7 +811,7 @@ case "$1" in
 
         FAILED=()
         for pkg in "${PACKAGES[@]}"; do
-            if ! remove_pkg "$pkg" "$DRY_RUN" "$PURGE"; then
+            if ! remove_pkg "$pkg" "$DRY_RUN" "$PURGE" "$SOURCE"; then
                 FAILED+=("$pkg")
             fi
         done
@@ -801,6 +847,48 @@ case "$1" in
         why_pkg "$2"
         ;;
 
+    add-profile)
+        if [[ -z "${2:-}" ]]; then
+            echo -e "${RED}Error:${NC} No profile name specified."
+            exit 1
+        fi
+        add_profile "$2"
+        ;;
+
+    remove-profile)
+        if [[ -z "${2:-}" ]]; then
+            echo -e "${RED}Error:${NC} No profile name specified."
+            exit 1
+        fi
+        remove_profile "$2"
+        ;;
+
+    profile-add)
+        if [[ -z "${2:-}" || -z "${3:-}" || -z "${4:-}" ]]; then
+            echo -e "${RED}Error:${NC} Usage: magnet profile-add <profile> <package> --source=<source>"
+            exit 1
+        fi
+        SOURCE=""
+        for arg in "${@:4}"; do
+            if [[ "$arg" == --source=* ]]; then
+                SOURCE="${arg#--source=}"
+            fi
+        done
+        if [[ -z "$SOURCE" ]]; then
+            echo -e "${RED}Error:${NC} --source is required for profile-add."
+            exit 1
+        fi
+        profile_add "$2" "$3" "$SOURCE"
+        ;;
+
+    profile-remove)
+        if [[ -z "${2:-}" || -z "${3:-}" ]]; then
+            echo -e "${RED}Error:${NC} Usage: magnet profile-remove <profile> <package>"
+            exit 1
+        fi
+        profile_remove "$2" "$3"
+        ;;
+
     export)
         export_pkgs "$2"
         ;;
@@ -813,27 +901,36 @@ case "$1" in
         show_log
         ;;
 
-    *)
+    -h|--help)
         echo -e "
 ${BOLD}Magnet${NC} — Package Management Wrapper v0.5
 
 ${BOLD}Usage:${NC}
-  magnet install [--source=pacman|aur|debian|fedora|flatpak] [--dry-run] <pkg> [pkg2 ...]
-  magnet remove  [--dry-run] [--no-purge] <pkg> [pkg2 ...]
-  magnet search  <pkg>
+  magnet install        [--source=pacman|aur|debian|fedora] [--dry-run] <pkg> [pkg2 ...]
+  magnet remove         [--source=pacman|aur|debian|fedora] [--dry-run] [--no-purge] <pkg> [pkg2 ...]
+  magnet search         <pkg>
   magnet update
-  magnet list    [--source=pacman|aur|debian|fedora|flatpak]
-  magnet info    <pkg>
-  magnet why     <pkg>
-  magnet export  <profile>
-  magnet import  <profile>
+  magnet list           [--source=pacman|aur|debian|fedora]
+  magnet info           <pkg>
+  magnet why            <pkg>
+  magnet export         <profile>
+  magnet import         <profile>
+  magnet add-profile    <profile>
+  magnet remove-profile <profile>
+  magnet profile-add    <profile> <pkg> --source=pacman|aur|debian|fedora
+  magnet profile-remove <profile> <pkg>
   magnet log
 
 ${BOLD}Notes:${NC}
+  --source      Force a specific package manager (install priority:
+                pacman → AUR → Debian → Fedora)
   --no-purge    Skip XDG desktop entry/icon cleanup on remove (container packages only)
   --dry-run     Preview what would happen without making any changes
-  --source      Force a specific package manager (install priority otherwise:
-                pacman → AUR → Flatpak → Debian → Fedora)
 "
+        ;;
+
+    *)
+        log_err "Unknown command '$1'. Run 'magnet --help' for usage."
+        exit 1
         ;;
 esac
