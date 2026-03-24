@@ -35,6 +35,12 @@ That's it. The bootstrap installs the `magnet` script, sets up the Distrobox con
 
 ## Usage
 
+### Help
+```bash
+sudo magnet --help                         # show full usage
+sudo magnet -h                             # shorthand
+```
+
 ### Install packages
 ```bash
 sudo magnet install vim
@@ -49,7 +55,9 @@ Install priority (when no `--source` is given): `pacman` → `AUR` → `Debian c
 ```bash
 sudo magnet remove vim
 sudo magnet remove vim htop curl           # multiple packages
+sudo magnet remove --source=debian vim     # force removal from a specific source
 sudo magnet remove --dry-run vim           # preview without removing
+sudo magnet remove --no-purge vim          # skip XDG desktop entry cleanup
 ```
 
 ### Search
@@ -70,13 +78,33 @@ sudo magnet info vim                       # show install metadata for a package
 sudo magnet why vim                        # human-readable install attribution
 ```
 
-### Profiles (export / import)
+### Profiles
+Profiles are curated lists of packages stored as plain CSVs at `/var/lib/magnet/profiles/<n>.csv`. They can be built manually, shared between machines, and imported to reproduce a full setup in one command.
+
 ```bash
-sudo magnet export myprofile               # export current DB as a named profile
-sudo magnet import myprofile               # install all packages from a profile
+# Create and manage profiles
+sudo magnet add-profile gaming             # create a new empty profile
+sudo magnet remove-profile gaming          # delete a profile
+
+# Add and remove packages from a profile (does not install or uninstall anything)
+sudo magnet profile-add gaming steam --source=aur
+sudo magnet profile-add gaming lutris --source=aur
+sudo magnet profile-remove gaming lutris
+
+# Apply a profile to the system
+sudo magnet import gaming                  # installs all packages in the profile
+
+# Snapshot current installed packages into a profile
+sudo magnet export myprofile               # saves current DB as a named profile
 ```
 
-Profiles are plain CSVs stored at `/var/lib/magnet/profiles/<name>.csv` and can be shared freely between machines.
+Profiles are plain CSVs and can be edited by hand or shared freely:
+```
+package,source,date,user
+steam,aur,2026-03-06 12:00:00,alice
+discord,aur,2026-03-06 12:05:00,alice
+gamemode,pacman,2026-03-06 12:10:00,alice
+```
 
 ### Log
 ```bash
@@ -89,6 +117,8 @@ sudo magnet log                            # pretty-print the Magnet log
 
 Magnet delegates every operation to the appropriate underlying package manager. It uses per-package-manager lockfiles under `/tmp/magnet-locks/` to prevent concurrent conflicts, and maintains a CSV database at `/var/lib/magnet/packages.csv` that tracks every package it installs — including the source, timestamp, and the user who installed it.
 
+When installing from a Distrobox container, Magnet automatically exports the app to the host desktop via `distrobox-export`. When removing a container package, it cleans up all leftover XDG desktop entries and icons so nothing is left behind in the app menu.
+
 ### Database format
 
 ```
@@ -99,10 +129,11 @@ htop,aur,2026-03-06 12:05:00,bob
 
 ### Source flag
 
-The `--source` flag can appear anywhere in the argument list and applies to all packages in that invocation:
+The `--source` flag works on both `install` and `remove`, can appear anywhere in the argument list, and applies to all packages in that invocation:
 
 ```bash
 sudo magnet install pkg1 pkg2 --source=debian pkg3  # all three install from debian
+sudo magnet remove pkg1 pkg2 --source=aur            # remove both from AUR specifically
 ```
 
 ---
