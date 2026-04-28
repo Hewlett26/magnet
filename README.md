@@ -2,7 +2,7 @@
 
 A unified package management wrapper for Arch Linux systems running [Distrobox](https://github.com/89luca89/distrobox). Magnet provides a single CLI interface that transparently delegates to `pacman`, `yay` (AUR), `apt` (via a Debian container), and `dnf` (via a Fedora container) — with a persistent database tracking everything it installs.
 
-> **Current version:** v0.5 — [See what's new](CHANGELOG.md)
+> **Current version:** v0.6 — [See what's new](CHANGELOG.md)
 
 ---
 
@@ -25,11 +25,25 @@ The bootstrap script handles container creation and all other setup automaticall
 git clone https://github.com/yourusername/magnet.git
 cd magnet
 chmod +x bootstrap.sh
-sudo ./bootstrap.sh
+./bootstrap.sh
 cd .. && rm -rf magnet
 ```
 
-That's it. The bootstrap installs the `magnet` script, sets up the Distrobox containers, and initializes the database at `/var/lib/magnet/`. You can safely delete the cloned folder afterwards.
+The bootstrap installs the `magnet` script, sets up the Distrobox containers, initializes the database at `/var/lib/magnet/`, and installs shell completions for bash and fish (if installed). You can safely delete the cloned folder afterwards.
+
+---
+
+## Shell Completions
+
+Completions are installed automatically by the bootstrap. If you need to install them manually:
+
+```bash
+# Bash
+sudo install -m 644 magnet.bash-completion /usr/share/bash-completion/completions/magnet
+
+# Fish
+sudo install -m 644 magnet.fish /usr/share/fish/vendor_completions.d/magnet.fish
+```
 
 ---
 
@@ -37,8 +51,8 @@ That's it. The bootstrap installs the `magnet` script, sets up the Distrobox con
 
 ### Help
 ```bash
-sudo magnet --help                         # show full usage
-sudo magnet -h                             # shorthand
+sudo magnet --help
+sudo magnet -h
 ```
 
 ### Install packages
@@ -62,12 +76,23 @@ sudo magnet remove --no-purge vim          # skip XDG desktop entry cleanup
 
 ### Search
 ```bash
-sudo magnet search vim                     # search all sources
+sudo magnet search vim
 ```
+
+Shows the version available in each source and which source Magnet would pick by default.
 
 ### Update everything
 ```bash
-sudo magnet update                         # updates all sources in priority order
+sudo magnet update                         # updates all sources, skips pinned packages
+```
+
+### Pin packages
+Pinned packages are silently skipped during `magnet update`.
+
+```bash
+sudo magnet pin vim                        # pin a package
+sudo magnet unpin vim                      # unpin a package
+sudo magnet list                           # pinned packages shown with [pinned] marker
 ```
 
 ### Database & tracking
@@ -91,6 +116,9 @@ sudo magnet profile-add gaming steam --source=aur
 sudo magnet profile-add gaming lutris --source=aur
 sudo magnet profile-remove gaming lutris
 
+# Inspect a profile
+sudo magnet list --profile=gaming          # shows packages + installed/not installed status
+
 # Apply a profile to the system
 sudo magnet import gaming                  # installs all packages in the profile
 
@@ -105,6 +133,13 @@ steam,aur,2026-03-06 12:00:00,alice
 discord,aur,2026-03-06 12:05:00,alice
 gamemode,pacman,2026-03-06 12:10:00,alice
 ```
+
+### Doctor
+```bash
+sudo magnet doctor
+```
+
+Checks and auto-fixes common issues: yay installation, distrobox, container existence, database integrity, orphaned DB entries, and the lock directory.
 
 ### Log
 ```bash
@@ -145,8 +180,11 @@ sudo magnet remove pkg1 pkg2 --source=aur            # remove both from AUR spec
 | `/usr/local/bin/magnet` | The magnet script |
 | `/var/lib/magnet/packages.csv` | Package database |
 | `/var/lib/magnet/profiles/` | Saved profiles |
+| `/var/lib/magnet/pinned.txt` | Pinned packages list |
 | `/var/log/magnet.log` | Operation log |
 | `/tmp/magnet-locks/` | Runtime lockfiles (ephemeral) |
+| `/usr/share/bash-completion/completions/magnet` | Bash completion |
+| `/usr/share/fish/vendor_completions.d/magnet.fish` | Fish completion |
 
 ---
 
