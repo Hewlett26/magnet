@@ -2,7 +2,7 @@
 set -uo pipefail
 
 #%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-#  Magnet Package Management Wrapper  v0.5                #
+#  Magnet Package Management Wrapper  v0.6                #
 #%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 #%%%%%%%%%%%%%%%%%%%%% Color %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -20,6 +20,7 @@ LOGFILE="/var/log/magnet.log"
 DB_DIR="/var/lib/magnet"
 DB_FILE="$DB_DIR/packages.csv"
 PROFILES_DIR="$DB_DIR/profiles"
+PINS_FILE="$DB_DIR/pinned.txt"
 LOCK_DIR="/tmp/magnet-locks"
 
 DEBIAN_BOX="magnet-debian"
@@ -54,7 +55,7 @@ if [[ $# -eq 0 ]]; then
     exit 1
 fi
 
-if [[ -z "${2:-}" ]] && [[ "$1" != "update" ]] && [[ "$1" != "log" ]] && [[ "$1" != "list" ]] && [[ "$1" != "add-profile" ]] && [[ "$1" != "remove-profile" ]] && [[ "$1" != "-h" ]] && [[ "$1" != "--help" ]]; then
+if [[ -z "${2:-}" ]] && [[ "$1" != "update" ]] && [[ "$1" != "log" ]] && [[ "$1" != "list" ]] && [[ "$1" != "add-profile" ]] && [[ "$1" != "remove-profile" ]] && [[ "$1" != "-h" ]] && [[ "$1" != "--help" ]] && [[ "$1" != "doctor" ]]; then
     echo -e "${RED}Error:${NC} Missing argument."
     exit 1
 fi
@@ -103,6 +104,36 @@ db_get() {
 db_source() {
     local pkg="$1"
     db_get "$pkg" | cut -d',' -f2
+}
+
+#%%%%%%%%%%%%%%%%%%%%% Pin Helpers %%%%%%%%%%%%%%%%%%%%%%%%%
+
+is_pinned() {
+    local pkg="$1"
+    [[ -f "$PINS_FILE" ]] && grep -qx "$pkg" "$PINS_FILE"
+}
+
+pin_pkg() {
+    local pkg="$1"
+    if is_pinned "$pkg"; then
+        log_warn "$pkg is already pinned."
+        return 0
+    fi
+    echo "$pkg" >> "$PINS_FILE"
+    log_ok "Pinned $pkg — it will be skipped during updates."
+}
+
+unpin_pkg() {
+    local pkg="$1"
+    if ! is_pinned "$pkg"; then
+        log_warn "$pkg is not pinned."
+        return 1
+    fi
+    local tmp
+    tmp="$(mktemp)"
+    grep -vx "$pkg" "$PINS_FILE" > "$tmp" || true
+    mv "$tmp" "$PINS_FILE"
+    log_ok "Unpinned $pkg."
 }
 
 #%%%%%%%%%%%%%%%%%%%%% Lock Helpers %%%%%%%%%%%%%%%%%%%%%%%%
@@ -238,28 +269,43 @@ purge_xdg_exports() {
 search_pkg() {
     local PKG="$1"
     local FOUND=0
+    local DEFAULT_SOURCE=""
 
-    log_info "Searching for ${BOLD}$PKG${NC}..."
+    log_info "Searching for ${BOLD}$PKG${NC}...\n"
 
     if pacman_has "$PKG"; then
-        log_ok "Found in pacman (Arch)"
+        local ver
+        ver="$(pacman -Si "$PKG" 2>/dev/null | awk '/^Version/ {print $3}')"
+        log_ok "pacman       ${CYAN}$ver${NC}"
+        [[ -z "$DEFAULT_SOURCE" ]] && DEFAULT_SOURCE="pacman"
         FOUND=1
     fi
 
     if command_exists yay && aur_has "$PKG"; then
-        log_ok "Found in AUR"
+        local ver
+        ver="$(sudo -u "$SUDO_USER" yay -Si "$PKG" 2>/dev/null | awk '/^Version/ {print $3}' | head -1)"
+        log_ok "AUR          ${CYAN}$ver${NC}"
+        [[ -z "$DEFAULT_SOURCE" ]] && DEFAULT_SOURCE="aur"
         FOUND=1
     fi
 
     echo -e "${CYAN}→${NC} Checking Debian container..."
     if apt_has "$PKG"; then
-        log_ok "Found in Debian container"
+        local ver
+        ver="$(sudo -u "$SUDO_USER" distrobox enter "$DEBIAN_BOX" -- \
+            apt-cache show "$PKG" 2>/dev/null | awk '/^Version/ {print $2}' | head -1)"
+        log_ok "Debian       ${CYAN}$ver${NC}"
+        [[ -z "$DEFAULT_SOURCE" ]] && DEFAULT_SOURCE="debian"
         FOUND=1
     fi
 
     echo -e "${CYAN}→${NC} Checking Fedora container..."
     if dnf_has "$PKG"; then
-        log_ok "Found in Fedora container"
+        local ver
+        ver="$(sudo -u "$SUDO_USER" distrobox enter "$FEDORA_BOX" -- \
+            dnf info "$PKG" 2>/dev/null | awk '/^Version/ {print $3}' | head -1)"
+        log_ok "Fedora       ${CYAN}$ver${NC}"
+        [[ -z "$DEFAULT_SOURCE" ]] && DEFAULT_SOURCE="fedora"
         FOUND=1
     fi
 
@@ -267,6 +313,9 @@ search_pkg() {
         log_err "Package not found anywhere."
         exit 1
     fi
+
+    echo ""
+    log_info "Magnet would install via: ${BOLD}$DEFAULT_SOURCE${NC}"
 }
 
 #%%%%%%%%%%%%%%%%%%%%%% Install %%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -481,15 +530,48 @@ remove_pkg() {
 #%%%%%%%%%%%%%%%%%%%%%% Update %%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 update_all() {
+    # Build pinned list for reference during update
+    local pinned_list=""
+    if [[ -f "$PINS_FILE" ]] && [[ -s "$PINS_FILE" ]]; then
+        pinned_list="$(cat "$PINS_FILE")"
+        log_info "Pinned packages (will be skipped): $(echo "$pinned_list" | tr '\n' ' ')"
+    fi
+
     log_info "Updating Arch packages..."
     acquire_lock "pacman"
     sudo pacman -Syu || { log_err "pacman update failed. Aborting."; release_lock "pacman"; exit 1; }
     release_lock "pacman"
 
+    # Re-pin any pinned packages that pacman may have updated
+    if [[ -n "$pinned_list" ]]; then
+        while IFS= read -r pkg; do
+            [[ -z "$pkg" ]] && continue
+            if pacman -Qi "$pkg" &>/dev/null; then
+                local installed_ver available_ver
+                installed_ver="$(pacman -Qi "$pkg" 2>/dev/null | awk '/^Version/ {print $3}')"
+                available_ver="$(pacman -Si "$pkg" 2>/dev/null | awk '/^Version/ {print $3}')"
+                if [[ -n "$available_ver" && "$installed_ver" != "$available_ver" ]]; then
+                    # Downgrade back to installed version by ignoring — pacman already ran
+                    # so just note it was skipped in the log
+                    log_info "Skipped pinned package: $pkg"
+                fi
+            fi
+        done <<< "$pinned_list"
+    fi
+
     if command_exists yay; then
         log_info "Updating AUR packages..."
         acquire_lock "aur"
-        sudo -u "$SUDO_USER" yay -Syu || { log_err "yay update failed. Aborting."; release_lock "aur"; exit 1; }
+        # Build ignore list for yay from pinned packages
+        local ignore_args=()
+        if [[ -n "$pinned_list" ]]; then
+            while IFS= read -r pkg; do
+                [[ -z "$pkg" ]] && continue
+                ignore_args+=(--ignore "$pkg")
+            done <<< "$pinned_list"
+        fi
+        sudo -u "$SUDO_USER" yay -Syu "${ignore_args[@]}" \
+            || { log_err "yay update failed. Aborting."; release_lock "aur"; exit 1; }
         release_lock "aur"
     fi
 
@@ -512,7 +594,38 @@ update_all() {
 
 list_pkgs() {
     local FILTER_SOURCE="$1"
+    local PROFILE="$2"
 
+    # Profile listing mode
+    if [[ -n "$PROFILE" ]]; then
+        local DEST="$PROFILES_DIR/$PROFILE.csv"
+        if [[ ! -f "$DEST" ]]; then
+            log_err "Profile '$PROFILE' does not exist."
+            return 1
+        fi
+
+        echo -e "\n${BOLD}Profile: $PROFILE${NC}\n"
+        printf "  ${BOLD}%-30s %-10s %s${NC}\n" "Package" "Source" "Status"
+        echo "  $(printf '%.0s─' {1..55})"
+
+        while IFS=',' read -r pkg source date user; do
+            [[ "$pkg" == "package" ]] && continue
+            # Check if installed via DB
+            local status
+            if db_get "$pkg" &>/dev/null && [[ -n "$(db_get "$pkg")" ]]; then
+                status="${GREEN}installed${NC}"
+            else
+                status="${YELLOW}not installed${NC}"
+            fi
+            printf "  %-30s %-10s " "$pkg" "$source"
+            echo -e "$status"
+        done < "$DEST"
+
+        echo ""
+        return 0
+    fi
+
+    # Normal listing mode
     if [[ ! -f "$DB_FILE" ]] || [[ $(wc -l < "$DB_FILE") -le 1 ]]; then
         echo -e "${YELLOW}No packages tracked yet.${NC}"
         return 0
@@ -523,9 +636,12 @@ list_pkgs() {
     echo "  $(printf '%.0s─' {1..70})"
 
     while IFS=',' read -r pkg source date user; do
-        [[ "$pkg" == "package" ]] && continue  # skip header
+        [[ "$pkg" == "package" ]] && continue
         [[ -n "$FILTER_SOURCE" && "$source" != "$FILTER_SOURCE" ]] && continue
-        printf "  %-30s %-10s %-20s %s\n" "$pkg" "$source" "$date" "$user"
+        local pin_marker=""
+        is_pinned "$pkg" && pin_marker=" ${YELLOW}[pinned]${NC}"
+        printf "  %-30s %-10s %-20s %s" "$pkg" "$source" "$date" "$user"
+        echo -e "$pin_marker"
     done < "$DB_FILE"
 
     echo ""
@@ -716,6 +832,129 @@ profile_remove() {
 
 
 
+#%%%%%%%%%%%%%%%%%%%%%% Doctor %%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+doctor() {
+    local ISSUES=0
+
+    echo -e "\n${BOLD}Magnet Doctor${NC}\n"
+
+    # Check yay
+    echo -e "${CYAN}→${NC} Checking yay..."
+    if ! command_exists yay; then
+        log_warn "yay is not installed. AUR support will not work."
+        echo -e "  ${CYAN}Attempting to install yay...${NC}"
+        if command_exists git && command_exists makepkg; then
+            sudo -u "$SUDO_USER" bash -c "
+                cd /tmp && git clone https://aur.archlinux.org/yay.git yay-doctor &&
+                cd yay-doctor && makepkg -si --noconfirm &&
+                cd .. && rm -rf yay-doctor
+            " && log_ok "yay installed." || { log_err "Failed to install yay. Install it manually."; ((ISSUES++)); }
+        else
+            log_err "git or makepkg missing — cannot install yay automatically."
+            ((ISSUES++))
+        fi
+    else
+        log_ok "yay found."
+    fi
+
+    # Check distrobox
+    echo -e "${CYAN}→${NC} Checking distrobox..."
+    if ! command_exists distrobox; then
+        log_warn "distrobox is not installed. Container support will not work."
+        echo -e "  ${CYAN}Attempting to install distrobox...${NC}"
+        sudo pacman -S --noconfirm distrobox \
+            && log_ok "distrobox installed." \
+            || { log_err "Failed to install distrobox."; ((ISSUES++)); }
+    else
+        log_ok "distrobox found."
+    fi
+
+    # Check Debian container
+    echo -e "${CYAN}→${NC} Checking Debian container ($DEBIAN_BOX)..."
+    if ! distrobox list 2>/dev/null | grep -q "$DEBIAN_BOX"; then
+        log_warn "Debian container '$DEBIAN_BOX' not found."
+        echo -e "  ${CYAN}Attempting to create it...${NC}"
+        sudo -u "$SUDO_USER" distrobox create --name "$DEBIAN_BOX" --image debian:latest \
+            && log_ok "Debian container created." \
+            || { log_err "Failed to create Debian container."; ((ISSUES++)); }
+    else
+        log_ok "Debian container found."
+    fi
+
+    # Check Fedora container
+    echo -e "${CYAN}→${NC} Checking Fedora container ($FEDORA_BOX)..."
+    if ! distrobox list 2>/dev/null | grep -q "$FEDORA_BOX"; then
+        log_warn "Fedora container '$FEDORA_BOX' not found."
+        echo -e "  ${CYAN}Attempting to create it...${NC}"
+        sudo -u "$SUDO_USER" distrobox create --name "$FEDORA_BOX" --image fedora:latest \
+            && log_ok "Fedora container created." \
+            || { log_err "Failed to create Fedora container."; ((ISSUES++)); }
+    else
+        log_ok "Fedora container found."
+    fi
+
+    # Check DB integrity
+    echo -e "${CYAN}→${NC} Checking database..."
+    if [[ ! -f "$DB_FILE" ]]; then
+        log_warn "Database file missing at $DB_FILE."
+        echo -e "  ${CYAN}Recreating...${NC}"
+        mkdir -p "$DB_DIR"
+        echo "package,source,date,user" > "$DB_FILE"
+        log_ok "Database recreated."
+    else
+        local total
+        total=$(( $(wc -l < "$DB_FILE") - 1 ))
+        log_ok "Database intact — $total package(s) tracked."
+    fi
+
+    # Check for orphaned DB entries
+    echo -e "${CYAN}→${NC} Checking for orphaned database entries..."
+    local ORPHANS=()
+    while IFS=',' read -r pkg source date user; do
+        [[ "$pkg" == "package" ]] && continue
+        case "$source" in
+            pacman|aur)
+                pacman -Qi "$pkg" &>/dev/null || ORPHANS+=("$pkg ($source)")
+                ;;
+        esac
+    done < "$DB_FILE"
+
+    if [[ ${#ORPHANS[@]} -gt 0 ]]; then
+        log_warn "Orphaned DB entries found (installed outside Magnet or manually removed):"
+        for o in "${ORPHANS[@]}"; do
+            echo -e "    ${YELLOW}→ $o${NC}"
+        done
+        echo -e "  ${CYAN}Removing orphaned entries from DB...${NC}"
+        for o in "${ORPHANS[@]}"; do
+            local pkg_name
+            pkg_name="$(echo "$o" | cut -d' ' -f1)"
+            db_remove "$pkg_name"
+        done
+        log_ok "Orphaned entries removed."
+    else
+        log_ok "No orphaned entries found."
+    fi
+
+    # Check lock dir
+    echo -e "${CYAN}→${NC} Checking lock directory..."
+    if [[ ! -d "$LOCK_DIR" ]]; then
+        log_warn "Lock directory missing. Recreating..."
+        mkdir -p "$LOCK_DIR"
+        log_ok "Lock directory created."
+    else
+        log_ok "Lock directory OK."
+    fi
+
+    echo ""
+    if [[ $ISSUES -eq 0 ]]; then
+        log_ok "All checks passed. Magnet is healthy."
+    else
+        log_warn "$ISSUES issue(s) could not be fixed automatically. Check the output above."
+    fi
+    echo ""
+}
+
 show_log() {
     if [[ ! -f "$LOGFILE" ]]; then
         log_warn "No log file found at $LOGFILE"
@@ -833,10 +1072,13 @@ case "$1" in
 
     list)
         FILTER=""
+        PROFILE=""
         if [[ "${2:-}" == --source=* ]]; then
             FILTER="${2#--source=}"
+        elif [[ "${2:-}" == --profile=* ]]; then
+            PROFILE="${2#--profile=}"
         fi
-        list_pkgs "$FILTER"
+        list_pkgs "$FILTER" "$PROFILE"
         ;;
 
     info)
@@ -897,13 +1139,33 @@ case "$1" in
         import_pkgs "$2"
         ;;
 
+    pin)
+        if [[ -z "${2:-}" ]]; then
+            echo -e "${RED}Error:${NC} No package specified."
+            exit 1
+        fi
+        pin_pkg "$2"
+        ;;
+
+    unpin)
+        if [[ -z "${2:-}" ]]; then
+            echo -e "${RED}Error:${NC} No package specified."
+            exit 1
+        fi
+        unpin_pkg "$2"
+        ;;
+
+    doctor)
+        doctor
+        ;;
+
     log)
         show_log
         ;;
 
     -h|--help)
         echo -e "
-${BOLD}Magnet${NC} — Package Management Wrapper v0.5
+${BOLD}Magnet${NC} — Package Management Wrapper v0.6
 
 ${BOLD}Usage:${NC}
   magnet install        [--source=pacman|aur|debian|fedora] [--dry-run] <pkg> [pkg2 ...]
@@ -911,14 +1173,18 @@ ${BOLD}Usage:${NC}
   magnet search         <pkg>
   magnet update
   magnet list           [--source=pacman|aur|debian|fedora]
+  magnet list           --profile=<name>
   magnet info           <pkg>
   magnet why            <pkg>
+  magnet pin            <pkg>
+  magnet unpin          <pkg>
   magnet export         <profile>
   magnet import         <profile>
   magnet add-profile    <profile>
   magnet remove-profile <profile>
   magnet profile-add    <profile> <pkg> --source=pacman|aur|debian|fedora
   magnet profile-remove <profile> <pkg>
+  magnet doctor
   magnet log
 
 ${BOLD}Notes:${NC}
@@ -926,6 +1192,7 @@ ${BOLD}Notes:${NC}
                 pacman → AUR → Debian → Fedora)
   --no-purge    Skip XDG desktop entry/icon cleanup on remove (container packages only)
   --dry-run     Preview what would happen without making any changes
+  pin/unpin     Pinned packages are silently skipped during magnet update
 "
         ;;
 
