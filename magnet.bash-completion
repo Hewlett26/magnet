@@ -1,0 +1,130 @@
+# Bash completion for magnet
+# Install to: /usr/share/bash-completion/completions/magnet
+
+_magnet_profiles() {
+    local profiles_dir="/var/lib/magnet/profiles"
+    if [[ -d "$profiles_dir" ]]; then
+        find "$profiles_dir" -name "*.csv" -printf "%f\n" 2>/dev/null | sed 's/\.csv$//'
+    fi
+}
+
+_magnet_installed() {
+    local db="/var/lib/magnet/packages.csv"
+    if [[ -f "$db" ]]; then
+        tail -n +2 "$db" | cut -d',' -f1
+    fi
+}
+
+_magnet_pinned() {
+    local pins="/var/lib/magnet/pinned.txt"
+    if [[ -f "$pins" ]]; then
+        cat "$pins"
+    fi
+}
+
+_magnet() {
+    local cur prev words cword
+    _init_completion || return
+
+    local commands="install remove search update list info why pin unpin export import add-profile remove-profile profile-add profile-remove doctor log --help -h"
+    local sources="pacman aur debian fedora"
+
+    case "$cword" in
+        1)
+            COMPREPLY=( $(compgen -W "$commands" -- "$cur") )
+            return
+            ;;
+    esac
+
+    case "${words[1]}" in
+        install)
+            case "$cur" in
+                --source=*)
+                    local val="${cur#--source=}"
+                    COMPREPLY=( $(compgen -W "$sources" -- "$val") )
+                    COMPREPLY=( "${COMPREPLY[@]/#/--source=}" )
+                    ;;
+                -*)
+                    COMPREPLY=( $(compgen -W "--source= --dry-run" -- "$cur") )
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            ;;
+
+        remove)
+            case "$cur" in
+                --source=*)
+                    local val="${cur#--source=}"
+                    COMPREPLY=( $(compgen -W "$sources" -- "$val") )
+                    COMPREPLY=( "${COMPREPLY[@]/#/--source=}" )
+                    ;;
+                -*)
+                    COMPREPLY=( $(compgen -W "--source= --dry-run --no-purge" -- "$cur") )
+                    ;;
+                *)
+                    COMPREPLY=( $(compgen -W "$(_magnet_installed)" -- "$cur") )
+                    ;;
+            esac
+            ;;
+
+        list)
+            case "$cur" in
+                --source=*)
+                    local val="${cur#--source=}"
+                    COMPREPLY=( $(compgen -W "$sources" -- "$val") )
+                    COMPREPLY=( "${COMPREPLY[@]/#/--source=}" )
+                    ;;
+                --profile=*)
+                    local val="${cur#--profile=}"
+                    COMPREPLY=( $(compgen -W "$(_magnet_profiles)" -- "$val") )
+                    COMPREPLY=( "${COMPREPLY[@]/#/--profile=}" )
+                    ;;
+                -*)
+                    COMPREPLY=( $(compgen -W "--source= --profile=" -- "$cur") )
+                    ;;
+            esac
+            ;;
+
+        info|why)
+            COMPREPLY=( $(compgen -W "$(_magnet_installed)" -- "$cur") )
+            ;;
+
+        pin)
+            COMPREPLY=( $(compgen -W "$(_magnet_installed)" -- "$cur") )
+            ;;
+
+        unpin)
+            COMPREPLY=( $(compgen -W "$(_magnet_pinned)" -- "$cur") )
+            ;;
+
+        export|remove-profile)
+            COMPREPLY=( $(compgen -W "$(_magnet_profiles)" -- "$cur") )
+            ;;
+
+        import)
+            COMPREPLY=( $(compgen -W "$(_magnet_profiles)" -- "$cur") )
+            ;;
+
+        profile-add)
+            if [[ "$cword" -eq 2 ]]; then
+                COMPREPLY=( $(compgen -W "$(_magnet_profiles)" -- "$cur") )
+            elif [[ "$cur" == --source=* ]]; then
+                local val="${cur#--source=}"
+                COMPREPLY=( $(compgen -W "$sources" -- "$val") )
+                COMPREPLY=( "${COMPREPLY[@]/#/--source=}" )
+            elif [[ "$cword" -ge 4 ]]; then
+                COMPREPLY=( $(compgen -W "--source=" -- "$cur") )
+            fi
+            ;;
+
+        profile-remove)
+            if [[ "$cword" -eq 2 ]]; then
+                COMPREPLY=( $(compgen -W "$(_magnet_profiles)" -- "$cur") )
+            fi
+            ;;
+    esac
+}
+
+complete -F _magnet magnet
